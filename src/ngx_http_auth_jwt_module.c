@@ -661,14 +661,24 @@ ngx_http_auth_jwt_conf_set_token_variable(ngx_conf_t *cf,
     const size_t starts_with_len = sizeof("token=") - 1;
     if (value[2].len <= starts_with_len
         || ngx_strncmp(value[2].data, starts_with, starts_with_len) != 0) {
-      return "no token specified";
+        if (ngx_strcmp(value[1].data, "auto") == 0) {
+          lcf->enabled = 0;
+          return NGX_CONF_OK;
+        } else {
+          return "no token specified";
+        }
     }
 
     value[2].data = value[2].data + starts_with_len;
     value[2].len = value[2].len - starts_with_len;
 
     if (value[2].data[0] != '$') {
-      return "token is not a variable specified";
+        if (ngx_strcmp(value[1].data, "auto") == 0) {
+          lcf->enabled = 0;
+          return NGX_CONF_OK;
+        } else {
+          return "token is not a variable specified";
+        }
     }
 
     value[2].data++;
@@ -677,6 +687,7 @@ ngx_http_auth_jwt_conf_set_token_variable(ngx_conf_t *cf,
     lcf->token_variable = ngx_http_get_variable_index(cf, &value[2]);
     if (lcf->token_variable == NGX_ERROR) {
         if (ngx_strcmp(value[1].data, "auto") == 0) {
+          lcf->enabled = 0;
           return NGX_CONF_OK;
         } else {
           return "no token variables";
