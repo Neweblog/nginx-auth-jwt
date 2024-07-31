@@ -676,7 +676,11 @@ ngx_http_auth_jwt_conf_set_token_variable(ngx_conf_t *cf,
 
     lcf->token_variable = ngx_http_get_variable_index(cf, &value[2]);
     if (lcf->token_variable == NGX_ERROR) {
-      return "no token variables";
+        if (ngx_strcmp(value[1].data, "auto") == 0) {
+          return NGX_CONF_OK;
+        } else {
+          return "no token variables";
+        }
     }
   }
 
