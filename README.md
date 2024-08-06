@@ -98,6 +98,14 @@ location / {
 - [auth\_jwt\_allow\_nested](#auth_jwt_allow_nested)
 
 <a name="auth_jwt"></a>
+New use about auth_jwt: 1, auto property added to get token variables but not check and deny authentication; 2, mutipule token variables was suported to get token while first token variable was not exists.
+```
+Syntax: auth_jwt string|auto [token=$variable1] [token=$variable2] ...; | off;
+Default: auth_jwt off;
+Context: server
+Context: http, server, location
+```
+Original documents:
 ```
 Syntax: auth_jwt string [token=$variable] | off;
 Default: auth_jwt off;

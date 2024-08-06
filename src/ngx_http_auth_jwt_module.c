@@ -23,7 +23,7 @@ static char *ngx_http_auth_jwt_conf_set_header(ngx_conf_t *cf, ngx_command_t *cm
 static char *ngx_http_auth_jwt_conf_set_key_file(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_auth_jwt_conf_set_key_request(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_auth_jwt_conf_set_revocation(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-static char * ngx_http_auth_jwt_conf_set_requirement(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_http_auth_jwt_conf_set_requirement(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_auth_jwt_conf_set_require_variable(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_auth_jwt_conf_set_allow_nested(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 
@@ -44,6 +44,8 @@ typedef struct {
   time_t leeway;
   ngx_int_t phase;
   ngx_flag_t enabled;
+  ngx_flag_t is_auto;
+  ngx_flag_t skiped;
   ngx_str_t realm;
   struct {
     json_t *subs;
@@ -70,6 +72,9 @@ typedef struct {
     char *delimiter;
     char *quote;
   } nested;
+  ngx_array_t *token_variables;
+  u_char *info;
+  ngx_int_t token_variable_size;
 } ngx_http_auth_jwt_loc_conf_t;
 
 typedef struct {
@@ -155,7 +160,7 @@ static ngx_http_variable_t ngx_http_auth_jwt_vars[] = {
 
 static ngx_command_t ngx_http_auth_jwt_commands[] = {
   { ngx_string("auth_jwt"),
-    NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE12,
+    NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
     ngx_http_auth_jwt_conf_set_token_variable,
     NGX_HTTP_LOC_CONF_OFFSET,
     0,
@@ -497,6 +502,7 @@ ngx_http_auth_jwt_variable_find(ngx_http_request_t *r,
     v->not_found = 1;
     return NGX_OK;
   }
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint001 : %d , %d", cf->token_variable_size, cf->is_auto);
 
   if (use == NGX_HTTP_AUTH_JWT_VARIABLE_HEADER) {
     prefix = NGX_HTTP_AUTH_JWT_HEADER_VAR_PREFIX;
@@ -641,57 +647,90 @@ ngx_http_auth_jwt_conf_set_token_variable(ngx_conf_t *cf,
 {
   ngx_http_auth_jwt_loc_conf_t *lcf;
   ngx_str_t *value;
+  ngx_flag_t enabled = 0;
+  ngx_int_t *token_variable;
 
   lcf = conf;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint002 : %d , %d", lcf->token_variable_size, lcf->is_auto);
   value = cf->args->elts;
 
   if (ngx_strcmp(value[1].data, "off") == 0) {
     lcf->enabled = 0;
     return NGX_CONF_OK;
   }
+  if (ngx_strcmp(value[1].data, "auto") == 0) {
+    lcf->is_auto = 1;
+  } else {
+    lcf->is_auto = 0;
+  }
+  if (lcf->token_variables == NGX_CONF_UNSET_PTR) {
+    lcf->token_variables = ngx_array_create(cf->pool, 5, sizeof(ngx_int_t));
+    if (lcf->token_variables == NULL) {
+      return "failed to allocate";
+    }
+  }
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint1 lcf->token_variables->nelts = %l", lcf->token_variables->nelts);
+  lcf->skiped = 0;
 
   lcf->enabled = 1;
 
   lcf->realm.data = value[1].data;
   lcf->realm.len = value[1].len;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "cf->args->nelts %d", cf->args->nelts);
 
   if (cf->args->nelts > 2) {
-    /* check argument starts with "token=" */
-    const char *starts_with = "token=";
-    const size_t starts_with_len = sizeof("token=") - 1;
-    if (value[2].len <= starts_with_len
-        || ngx_strncmp(value[2].data, starts_with, starts_with_len) != 0) {
-        if (ngx_strcmp(value[1].data, "auto") == 0) {
-          lcf->enabled = 0;
-          return NGX_CONF_OK;
-        } else {
-          return "no token specified";
-        }
+    for (ngx_uint_t i=2; i<cf->args->nelts; i++) {
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint2, i=%d, %V", i, &value[i]);
+      /* check argument starts with "token=" */
+      const char *starts_with = "token=";
+      const size_t starts_with_len = sizeof("token=") - 1;
+      if (value[i].len <= starts_with_len
+          || ngx_strncmp(value[i].data, starts_with, starts_with_len) != 0) {
+          if (ngx_strcmp(value[1].data, "auto") == 0) {
+            lcf->enabled = 0;
+            return NGX_CONF_OK;
+          } else {
+            return "no token specified";
+          }
+      }
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint5, i=%d, %V", i, &value[i]);
+
+      value[i].data = value[i].data + starts_with_len;
+      value[i].len = value[i].len - starts_with_len;
+
+      if (value[i].data[0] != '$') {
+          if (ngx_strcmp(value[1].data, "auto") == 0) {
+            lcf->enabled = 0;
+            return NGX_CONF_OK;
+          } else {
+            return "token is not a variable specified";
+          }
+      }
+
+      value[i].data++;
+      value[i].len--;
+
+      if (i==2) {
+        lcf->token_variable = ngx_http_get_variable_index(cf, &value[2]);
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint8, %l", lcf->token_variable);
+      } else {
+         token_variable = ngx_array_push(lcf->token_variables);
+         *token_variable = ngx_http_get_variable_index(cf, &value[i]);
+        lcf->token_variable_size = i-2;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint8.-1 value[i].len = %d, value[i] = %V", value[i].len, &value[i]);
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint8.0 i = %d, lcf->token_variable_size = %d, lcf->token_variables->nelts = %l", i, lcf->token_variable_size, lcf->token_variables->nelts);
+      }
+      if (lcf->token_variable == NGX_ERROR) {
+          if (ngx_strcmp(value[1].data, "auto") != 0) {
+            return "no token variables";
+          }
+      } else {
+        enabled = 1;
+      }
     }
-
-    value[2].data = value[2].data + starts_with_len;
-    value[2].len = value[2].len - starts_with_len;
-
-    if (value[2].data[0] != '$') {
-        if (ngx_strcmp(value[1].data, "auto") == 0) {
-          lcf->enabled = 0;
-          return NGX_CONF_OK;
-        } else {
-          return "token is not a variable specified";
-        }
-    }
-
-    value[2].data++;
-    value[2].len--;
-
-    lcf->token_variable = ngx_http_get_variable_index(cf, &value[2]);
-    if (lcf->token_variable == NGX_ERROR) {
-        if (ngx_strcmp(value[1].data, "auto") == 0) {
-          lcf->enabled = 0;
-          return NGX_CONF_OK;
-        } else {
-          return "no token variables";
-        }
+    if (ngx_strcmp(value[1].data, "auto") == 0 && enabled==0) {
+      lcf->enabled = 0;
+      return NGX_CONF_OK;
     }
   }
 
@@ -710,8 +749,12 @@ ngx_http_auth_jwt_conf_set_variable(ngx_conf_t *cf,
   size_t prefix_len = strlen(prefix);
 
   lcf = conf;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint003 : %d , %d", lcf->token_variable_size, lcf->is_auto);
   value = cf->args->elts;
 
+  if (lcf->skiped == 1) {
+    return NGX_CONF_OK;
+  }
   if (value[1].data[0] != '$') {
     return "not a variable specified";
   }
@@ -821,6 +864,7 @@ ngx_http_auth_jwt_conf_set_key_file(ngx_conf_t *cf,
   ngx_str_t *value;
 
   lcf = conf;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint004 : %d , %d", lcf->token_variable_size, lcf->is_auto);
   value = cf->args->elts;
 
   if (value[1].len == 0) {
@@ -981,6 +1025,7 @@ ngx_http_auth_jwt_conf_set_require_variable(ngx_conf_t *cf,
   const size_t error_with_len = sizeof("error=") - 1;
 
   lcf = conf;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint005: %d , %d", lcf->token_variable_size, lcf->is_auto);
   value = cf->args->elts;
   n = cf->args->nelts - 1;
 
@@ -1046,6 +1091,7 @@ ngx_http_auth_jwt_conf_set_key_request(ngx_conf_t *cf,
   ngx_http_auth_jwt_key_request_t *key_request;
 
   lcf = conf;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint006: %d , %d", lcf->token_variable_size, lcf->is_auto);
   value = cf->args->elts;
 
   if (value[1].len == 0) {
@@ -1105,6 +1151,7 @@ ngx_http_auth_jwt_conf_set_allow_nested(ngx_conf_t *cf,
   ngx_str_t *value;
 
   lcf = conf;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint007: %d , %d", lcf->token_variable_size, lcf->is_auto);
   value = cf->args->elts;
 
   for (i = 1; i < cf->args->nelts; i++) {
@@ -1195,11 +1242,13 @@ ngx_http_auth_jwt_create_loc_conf(ngx_conf_t *cf)
   ngx_http_auth_jwt_loc_conf_t *conf;
 
   conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_auth_jwt_loc_conf_t));
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint009 : %d , %d", conf->token_variable, conf->is_auto);
   if (conf == NULL) {
     return NGX_CONF_ERROR;
   }
 
   conf->token_variable = NGX_CONF_UNSET;
+  conf->token_variables = NGX_CONF_UNSET_PTR;
   conf->set_vars = NGX_CONF_UNSET_PTR;
   conf->leeway = NGX_CONF_UNSET;
   conf->phase = NGX_CONF_UNSET;
@@ -1219,6 +1268,7 @@ ngx_http_auth_jwt_create_loc_conf(ngx_conf_t *cf)
 
   conf->enabled = NGX_CONF_UNSET;
 
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint009.0 : %d , %d", conf->token_variable, conf->is_auto);
   return conf;
 }
 
@@ -1227,9 +1277,14 @@ ngx_http_auth_jwt_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
   ngx_http_auth_jwt_loc_conf_t *prev = parent;
   ngx_http_auth_jwt_loc_conf_t *conf = child;
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint010.1 : %d , %d", prev->token_variable_size, prev->is_auto);
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint010.2 : %d , %d", conf->token_variable_size, conf->is_auto);
+  conf->is_auto = prev->is_auto;
 
   ngx_conf_merge_value(conf->token_variable,
                        prev->token_variable, NGX_CONF_UNSET);
+  ngx_conf_merge_ptr_value(conf->token_variables, prev->token_variables, NGX_CONF_UNSET_PTR);
+  conf->token_variable_size = prev->token_variable_size;
   ngx_conf_merge_ptr_value(conf->set_vars, prev->set_vars, NULL);
 
   if (conf->key.files == NULL || conf->key.files->nelts == 0) {
@@ -1408,6 +1463,8 @@ ngx_http_auth_jwt_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                                           strlen(prev->nested.quote));
     }
   }
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint010.3 : %d , %d", prev->token_variable_size, prev->is_auto);
+//ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "auth_jwt: checkpoint010.4 : %d , %d", conf->token_variable_size, conf->is_auto);
 
   return NGX_CONF_OK;
 }
@@ -1511,6 +1568,7 @@ ngx_http_auth_jwt_response(ngx_http_request_t *r,
                            ngx_http_auth_jwt_ctx_t *ctx,
                            ngx_int_t use_error, ngx_int_t code)
 {
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint011 : %d , %d", cf->token_variable, cf->is_auto);
   if (ctx->use_bearer) {
     if (ngx_http_auth_jwt_set_bearer_header(r, &cf->realm,
                                             use_error) != NGX_OK) {
@@ -1564,6 +1622,7 @@ ngx_http_auth_jwt_load_keys(ngx_http_request_t *r,
   if (!cf || !ctx) {
     return NGX_DECLINED;
   }
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint012 : %d , %d", cf->token_variable, cf->is_auto);
   /* do not run if not validating JWT signature */
   if (!cf->validate.sig) {
     ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -1713,6 +1772,7 @@ ngx_http_auth_jwt_validate_variable(ngx_http_request_t *r,
 {
   ngx_uint_t i;
   ngx_http_complex_value_t *var;
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint013 : %d , %d", cf->token_variable, cf->is_auto);
 
   if (!cf->validate.variable.values) {
     return NGX_OK;
@@ -1755,6 +1815,7 @@ ngx_http_auth_jwt_validate_requirement(ngx_http_request_t *r,
   ngx_http_auth_jwt_requirement_t *requirement;
   const char *requirement_type;
 
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint014 : %d , %d", cf->token_variable, cf->is_auto);
   if (requirements == NULL) {
     return NGX_OK;
   }
@@ -1910,6 +1971,7 @@ ngx_http_auth_jwt_validate(ngx_http_request_t *r,
                   "auth_jwt: rejected due to missing required arguments");
     return NGX_ERROR;
   }
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint015 : %d , %d", cf->token_variable, cf->is_auto);
 
   algorithm = jwt_get_alg(ctx->jwt);
 
@@ -2079,13 +2141,15 @@ static ngx_int_t
 ngx_http_auth_jwt_handler(ngx_http_request_t *r, ngx_int_t phase)
 {
   ngx_http_auth_jwt_loc_conf_t *cf;
-  ngx_http_variable_value_t *variable;
+  ngx_http_variable_value_t *variable, *variable_loop;
   ngx_http_auth_jwt_ctx_t *ctx;
   ngx_pool_cleanup_t *cleanup;
   ngx_str_t var = ngx_string("");
+  ngx_int_t *value;
 
   cf = ngx_http_get_module_loc_conf(r, ngx_http_auth_jwt_module);
 
+//ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "auth_jwt: checkpoint016 : %d , %d", cf->token_variable, cf->is_auto);
   if (cf->enabled != 1) {
     return NGX_DECLINED;
   }
@@ -2132,9 +2196,28 @@ ngx_http_auth_jwt_handler(ngx_http_request_t *r, ngx_int_t phase)
     /* token from variable */
     variable = ngx_http_get_indexed_variable(r, cf->token_variable);
     if (variable->not_found) {
-      ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+      value = cf->token_variables->elts;
+      for (ngx_uint_t i=0; i < cf->token_variables->nelts; i++) {
+        if(value[i]!=NGX_ERROR) {
+          variable_loop = ngx_http_get_indexed_variable(r, value[i]);
+          if (!variable_loop->not_found && variable_loop->len>0) {
+            variable = variable_loop;
+            break;
+          }
+        }
+      }
+
+      if(variable->not_found) {
+      ngx_log_debug(NGX_LOG_ERR, r->connection->log, 0,
                     "auth_jwt: token variable specified was not provided");
-      return ngx_http_auth_jwt_http_error();
+        if (cf->is_auto == 1) {
+          cf->skiped = 1;
+          //return ngx_http_auth_jwt_http_ok();
+          return NGX_DECLINED;
+        } else {
+          return ngx_http_auth_jwt_http_error();
+        }
+      }
     }
     var.data = variable->data;
     var.len = variable->len;
@@ -2179,6 +2262,5 @@ ngx_http_auth_jwt_handler(ngx_http_request_t *r, ngx_int_t phase)
   if (ngx_http_auth_jwt_validate(r, cf, ctx) == NGX_ERROR) {
     return ngx_http_auth_jwt_http_error();
   }
-
   return ngx_http_auth_jwt_http_ok();
 }
